@@ -19,6 +19,7 @@ from tqdm import tqdm
 
 from dataset.cifar import DATASET_GETTERS
 from utils import AverageMeter, accuracy
+from dataset.shezhen import get_shezhen_data 
 
 logger = logging.getLogger(__name__)
 best_acc = 0
@@ -66,13 +67,14 @@ def de_interleave(x, size):
 
 
 def main():
+
     parser = argparse.ArgumentParser(description='PyTorch FixMatch Training')
     parser.add_argument('--gpu-id', default='0', type=int,
                         help='id(s) for CUDA_VISIBLE_DEVICES')
     parser.add_argument('--num-workers', type=int, default=4,
                         help='number of workers')
     parser.add_argument('--dataset', default='cifar10', type=str,
-                        choices=['cifar10', 'cifar100'],
+                        choices=['cifar10', 'cifar100','shezhen'],
                         help='dataset name')
     parser.add_argument('--num-labeled', type=int, default=4000,
                         help='number of labeled data')
@@ -125,8 +127,12 @@ def main():
     parser.add_argument('--no-progress', action='store_true',
                         help="don't use progress bar")
 
+
+
     args = parser.parse_args()
     global best_acc
+    writer = SummaryWriter(log_dir='runs/fixmatch_{}_{}_experiment'.format(args.dataset,args.num_labeled))
+
 
     def create_model(args):
         if args.arch == 'wideresnet':
@@ -198,12 +204,27 @@ def main():
             args.model_cardinality = 8
             args.model_depth = 29
             args.model_width = 64
+    elif args.dataset == 'shezhen':
+        args.num_classes = 10
+        if args.arch == 'wideresnet':
+            args.model_depth = 28
+            args.model_width = 2
+        elif args.arch == 'resnext':
+            args.model_cardinality = 4
+            args.model_depth = 28
+            args.model_width = 4
+    else:   
+        raise ValueError(
+            f"Unknown dataset {args.dataset}, please check the dataset name.")
 
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
 
-    labeled_dataset, unlabeled_dataset, test_dataset = DATASET_GETTERS[args.dataset](
-        args, './data')
+    #labeled_dataset, unlabeled_dataset, test_dataset = DATASET_GETTERS[args.dataset](args, './data')
+    if args.dataset == 'shezhen':
+        args.root_dir= "/git/fixmatch_dataset"
+    labeled_dataset, unlabeled_dataset, test_dataset = get_shezhen_data(args)
+
 
     if args.local_rank == 0:
         torch.distributed.barrier()
