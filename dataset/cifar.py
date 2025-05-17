@@ -7,6 +7,8 @@ from torchvision import datasets
 from torchvision import transforms
 
 from .randaugment import RandAugmentMC
+import torch
+
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +23,9 @@ normal_std = (0.5, 0.5, 0.5)
 def get_cifar10(args, root):
     transform_labeled = transforms.Compose([
         transforms.RandomHorizontalFlip(),
-        transforms.RandomCrop(size=32,
-                              padding=int(32*0.125),
-                              padding_mode='reflect'),
+        transforms.RandomCrop(size=32, 
+        padding=int(32*0.125), 
+        padding_mode='reflect'),
         transforms.ToTensor(),
         transforms.Normalize(mean=cifar10_mean, std=cifar10_std)
     ])
@@ -37,11 +39,11 @@ def get_cifar10(args, root):
         args, base_dataset.targets)
 
     train_labeled_dataset = CIFAR10SSL(
-        root, train_labeled_idxs, train=True,
+        base_dataset, train_labeled_idxs,  train=True,
         transform=transform_labeled)
 
     train_unlabeled_dataset = CIFAR10SSL(
-        root, train_unlabeled_idxs, train=True,
+        base_dataset, train_unlabeled_idxs, train=True,
         transform=TransformFixMatch(mean=cifar10_mean, std=cifar10_std))
 
     test_dataset = datasets.CIFAR10(
@@ -127,22 +129,29 @@ class TransformFixMatch(object):
         strong = self.strong(x)
         return self.normalize(weak), self.normalize(strong)
 
-
-class CIFAR10SSL(datasets.CIFAR10):
-    def __init__(self, root, indexs, train=True,
+class CIFAR10SSL(torch.utils.data.Dataset):
+    def __init__(self, base_dataset, indexs=None, train=True,
                  transform=None, target_transform=None,
                  download=False):
-        super().__init__(root, train=train,
-                         transform=transform,
-                         target_transform=target_transform,
-                         download=download)
+        super().__init__()
+        self.base_dataset = base_dataset
+        self.transform = transform
+        self.target_transform = target_transform
         if indexs is not None:
-            self.data = self.data[indexs]
-            self.targets = np.array(self.targets)[indexs]
+            self.data = base_dataset.data[indexs]
+            self.targets = np.array(base_dataset.targets)[indexs]
+        else:
+            self.data = base_dataset.data
+            self.targets = np.array(base_dataset.targets)
+    def __len__(self):
+        return len(self.data)
 
     def __getitem__(self, index):
         img, target = self.data[index], self.targets[index]
-        img = Image.fromarray(img)
+        if isinstance(img, np.ndarray):
+            img = img.astype(np.uint8)
+        else:
+            img = Image.open(img).convert('RGB')
 
         if self.transform is not None:
             img = self.transform(img)
@@ -180,3 +189,30 @@ class CIFAR100SSL(datasets.CIFAR100):
 
 DATASET_GETTERS = {'cifar10': get_cifar10,
                    'cifar100': get_cifar100}
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='CIFAR10/100 dataset')
+    parser.add_argument('--dataset', type=str, default='cifar10',
+                        choices=['cifar10', 'cifar100'],
+                        help='dataset name')
+    parser.add_argument('--root', type=str, default='./data',
+                        help='data root directory')
+    parser.add_argument('--num_labeled', type=int, default=4000,
+                        help='number of labeled data')
+    parser.add_argument('--num_classes', type=int, default=10,
+                        help='number of classes')
+    parser.add_argument('--batch_size', type=int, default=64,
+                        help='batch size')
+    parser.add_argument('--expand_labels', action='store_true',
+                        help='expand labels for unlabeled data')
+    args = parser.parse_args()
+    
+    dataset_getter = DATASET_GETTERS[args.dataset]
+    train_labeled_dataset, train_unlabeled_dataset, test_dataset = dataset_getter(args, args.root)
+    # 输出train_labeled_dataset和train_unlabeled_dataset中的数据包含哪些
+    for i in range(5):
+        print(f"Train Labeled Dataset {i}: {train_labeled_dataset[i]}")
+        #print(f"Train Unlabeled Dataset {i}: {train_unlabeled_dataset[i]}")
+        #print(f"Test Dataset {i}: {test_dataset[i]}")
+    # 
+

@@ -16,10 +16,13 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-
-from dataset.cifar import DATASET_GETTERS
+from dataset.cifar import DATASET_GETTERS 
 from utils import AverageMeter, accuracy
-from dataset.shezhen import get_shezhen_data 
+from torchvision import transforms
+from dataset.shezhen_json import get_shezhen9
+
+
+
 
 logger = logging.getLogger(__name__)
 best_acc = 0
@@ -69,6 +72,8 @@ def de_interleave(x, size):
 def main():
 
     parser = argparse.ArgumentParser(description='PyTorch FixMatch Training')
+    parser.add_argument('--data_dir', default='/git/datasets/fixmatch_dataset',
+                        type=str, help='path to dataset')
     parser.add_argument('--gpu-id', default='0', type=int,
                         help='id(s) for CUDA_VISIBLE_DEVICES')
     parser.add_argument('--num-workers', type=int, default=4,
@@ -80,6 +85,7 @@ def main():
                         help='number of labeled data')
     parser.add_argument("--expand-labels", action="store_true",
                         help="expand labels to fit eval steps")
+    parser.add_argument('--image_size', type=int, default=224)
     parser.add_argument('--arch', default='wideresnet', type=str,
                         choices=['wideresnet', 'resnext'],
                         help='dataset name')
@@ -130,6 +136,11 @@ def main():
 
 
     args = parser.parse_args()
+    if args.dataset == 'shezhen':
+        args.multi_label = True
+    else:
+        args.multi_label = False
+
     global best_acc
     writer = SummaryWriter(log_dir='runs/fixmatch_{}_{}_experiment'.format(args.dataset,args.num_labeled))
 
@@ -205,7 +216,7 @@ def main():
             args.model_depth = 29
             args.model_width = 64
     elif args.dataset == 'shezhen':
-        args.num_classes = 10
+        args.num_classes = 9
         if args.arch == 'wideresnet':
             args.model_depth = 28
             args.model_width = 2
@@ -220,10 +231,10 @@ def main():
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
 
-    #labeled_dataset, unlabeled_dataset, test_dataset = DATASET_GETTERS[args.dataset](args, './data')
-    if args.dataset == 'shezhen':
-        args.root_dir= "/git/fixmatch_dataset"
-    labeled_dataset, unlabeled_dataset, test_dataset = get_shezhen_data(args)
+    if args.dataset == 'shezhen': 
+        labeled_dataset, unlabeled_dataset, test_dataset =get_shezhen9(args, args.data_dir)
+    else:
+        labeled_dataset, unlabeled_dataset, test_dataset = DATASET_GETTERS[args.dataset](args, args.data_dir)
 
 
     if args.local_rank == 0:
@@ -383,15 +394,21 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             logits_x = logits[:batch_size]
             logits_u_w, logits_u_s = logits[batch_size:].chunk(2)
             del logits
+            if args.multi_label:
+                Lx = F.binary_cross_entropy_with_logits(logits_x, targets_x.float(), reduction='mean')
+                pseudo_label = torch.sigmoid(logits_u_w.detach() / args.T)  # [B, C]
+                mask = (pseudo_label >= args.threshold).float()             # [B, C]
+                targets_u = (pseudo_label >= args.threshold).float()        # [B, C]
+                Lu = F.binary_cross_entropy_with_logits(logits_u_s, targets_u, reduction='none')
+                Lu = (Lu * mask).mean()
 
-            Lx = F.cross_entropy(logits_x, targets_x, reduction='mean')
-
-            pseudo_label = torch.softmax(logits_u_w.detach()/args.T, dim=-1)
-            max_probs, targets_u = torch.max(pseudo_label, dim=-1)
-            mask = max_probs.ge(args.threshold).float()
-
-            Lu = (F.cross_entropy(logits_u_s, targets_u,
-                                  reduction='none') * mask).mean()
+            else:
+                Lx = F.cross_entropy(logits_x, targets_x, reduction='mean')
+                pseudo_label = torch.softmax(logits_u_w.detach()/args.T, dim=-1)
+                max_probs, targets_u = torch.max(pseudo_label, dim=-1)
+                mask = max_probs.ge(args.threshold).float()
+                Lu = (F.cross_entropy(logits_u_s, targets_u,
+                                    reduction='none') * mask).mean()
 
             loss = Lx + args.lambda_u * Lu
 
