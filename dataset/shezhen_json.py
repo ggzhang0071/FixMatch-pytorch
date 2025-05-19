@@ -5,10 +5,11 @@ import csv
 import torch
 import numpy as np
 from PIL import Image
+from torchvision import transforms
 from torch.utils.data import Dataset
 from torchvision import datasets, transforms
 from .randaugment import RandAugmentMC
-from dataset.cifar import CIFAR10SSL, TransformFixMatch
+from dataset.cifar import CIFAR10SSL
 
 logger = logging.getLogger(__name__)
 
@@ -27,11 +28,14 @@ class SheZhenDataset(Dataset):
         self.train = train
         self.unlabeled = unlabeled 
         self.transform = transform
+        self.all_classes = ['气虚质', '阳虚质', '阴虚质', '痰湿质', '湿热质', '血瘀质', '气郁质', '特禀质', '平和质']
+
 
         if train:
             if unlabeled:
                 self.data_dir = os.path.join(root, 'train', 'unlabeled')
                 self.samples = [(fname, []) for fname in os.listdir(self.data_dir)]
+
             else:
                 self.data_dir = os.path.join(root, 'train', 'images')
                 label_file = os.path.join(root, 'train', 'labels.csv')
@@ -74,8 +78,7 @@ class SheZhenDataset(Dataset):
         return image, label_vector
 
     def _encode_labels(self, labels):
-        all_classes = ['气虚质', '阳虚质', '阴虚质', '痰湿质', '湿热质', '血瘀质', '气郁质', '特禀质', '平和质']
-        label_vector = [1 if cls in labels else 0 for cls in all_classes]
+        label_vector = [1 if cls in labels else 0 for cls in self.all_classes]
         return torch.tensor(label_vector, dtype=torch.float32)  
 
 
@@ -83,41 +86,73 @@ class SheZhenDataset(Dataset):
 
 def get_shezhen9(args, root):
     transform_labeled = transforms.Compose([
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomCrop(size=32,
-                              padding=int(32*0.125),
-                              padding_mode='reflect'),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=cifar10_mean, std=cifar10_std)
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomCrop(size=224, padding=int(224*0.125), padding_mode='reflect'),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=cifar10_mean, std=cifar10_std)
     ])
+    # 测试/验证集 transform
     transform_val = transforms.Compose([
+        transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(mean=cifar10_mean, std=cifar10_std)
     ])
+
+    # 基础 transform（用于初步统一尺寸）
+    resize_transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor()
+    ])
+
+    transform_fixmatch = TransformFixMatch(mean=cifar10_mean, std=cifar10_std)
+
 
     root="/git/datasets/fixmatch_dataset"
 
-    train_labeled_dataset = SheZhenDataset(root, train=True, unlabeled=False)
-    train_unlabeled_dataset = SheZhenDataset(root, train=True, unlabeled=True)
-    test_dataset = SheZhenDataset(root, train=False)
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),  # 统一尺寸
+        transforms.ToTensor(),
+        # 其他 transform，例如 Normalize
+    ])
 
-    """
-    train_labeled_idxs = list(range(len(train_labeled_dataset)))
-    train_unlabeled_idxs = list(range(len(train_unlabeled_dataset)))"""
+ 
+    # 把 resize_transform 传进去做底层图像尺寸统一
+    train_labeled_dataset = SheZhenDataset(root, train=True, unlabeled=False, transform=resize_transform)
+    train_unlabeled_dataset = SheZhenDataset(root, train=True, unlabeled=True, transform=resize_transform)
+    test_dataset = SheZhenDataset(root, train=False, transform=resize_transform)
 
-    train_labeled_dataset = CIFAR10SSL(
-        train_labeled_dataset, train=True,
-        transform=transform_labeled)
-
-    train_unlabeled_dataset = CIFAR10SSL(
-        train_unlabeled_dataset, train=True,
-        transform=TransformFixMatch(mean=cifar10_mean, std=cifar10_std))
-
-    test_dataset = CIFAR10SSL(
-        test_dataset, train=False, transform=transform_val)
+    # 外包装（包装后的 transform 才能保证增强或 Normalize）
+    train_labeled_dataset = CIFAR10SSL(train_labeled_dataset, train=True, transform=transform_labeled)
+    train_unlabeled_dataset = CIFAR10SSL(train_unlabeled_dataset, train=True, transform=transform_fixmatch)
+    test_dataset = CIFAR10SSL(test_dataset, train=False, transform=transform_val)
 
     return train_labeled_dataset, train_unlabeled_dataset, test_dataset
 
+
+
+class TransformFixMatch(object):
+    def __init__(self, mean=normal_mean, std=normal_std):
+        self.weak = transforms.Compose([
+                transforms.Resize((224, 224)),  # ✅ 强制调整尺寸
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomCrop(size=224, padding=int(224*0.125), padding_mode='reflect')
+            ])
+        self.strong = transforms.Compose([
+                transforms.Resize((224, 224)),  # ✅ 强制调整尺寸
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomCrop(size=224, padding=int(224*0.125), padding_mode='reflect'),
+                RandAugmentMC(n=2, m=10)
+            ])
+        self.normalize = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std)
+            ])
+
+
+    def __call__(self, x):
+        weak = self.weak(x)
+        strong = self.strong(x)
+        return self.normalize(weak), self.normalize(strong)
 
 
 

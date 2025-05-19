@@ -20,6 +20,7 @@ from dataset.cifar import DATASET_GETTERS
 from utils import AverageMeter, accuracy
 from torchvision import transforms
 from dataset.shezhen_json import get_shezhen9
+from sklearn.metrics import f1_score, accuracy_score
 
 
 
@@ -70,7 +71,6 @@ def de_interleave(x, size):
 
 
 def main():
-
     parser = argparse.ArgumentParser(description='PyTorch FixMatch Training')
     parser.add_argument('--data_dir', default='/git/datasets/fixmatch_dataset',
                         type=str, help='path to dataset')
@@ -132,7 +132,6 @@ def main():
                         help="For distributed training: local_rank")
     parser.add_argument('--no-progress', action='store_true',
                         help="don't use progress bar")
-
 
 
     args = parser.parse_args()
@@ -336,6 +335,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
     global best_acc
     test_accs = []
     end = time.time()
+    
 
     if args.world_size > 1:
         labeled_epoch = 0
@@ -394,19 +394,35 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             logits_x = logits[:batch_size]
             logits_u_w, logits_u_s = logits[batch_size:].chunk(2)
             del logits
-            if args.multi_label:
+            if args.multi_label:  # 多
+                Lx = F.binary_cross_entropy_with_logits(logits_x, targets_x.float(), reduction='mean')失
                 Lx = F.binary_cross_entropy_with_logits(logits_x, targets_x.float(), reduction='mean')
-                pseudo_label = torch.sigmoid(logits_u_w.detach() / args.T)  # [B, C]
-                mask = (pseudo_label >= args.threshold).float()             # [B, C]
-                targets_u = (pseudo_label >= args.threshold).float()        # [B, C]
-                Lu = F.binary_cross_entropy_with_logits(logits_u_s, targets_u, reduction='none')
-                Lu = (Lu * mask).mean()
 
-            else:
+                # 生成无标签数据的伪标签
+                pseudo_label = torch.sigmoid(logits_u_w.detach() / args.T)  # [B, C] 使用sigmoid函数生成每个类别的概率
+
+                # 生成mask,标记置信度高于阈值的预测
+                mask = (pseudo_label >= args.threshold).float()             # [B, C] 
+
+                # 将高置信度的预测作为伪标签
+                targets_u = (pseudo_label >= args.threshold).float()        # [B, C]
+
+                # 计算无标签数据的损失
+                Lu = F.binary_cross_entropy_with_logits(logits_u_s, targets_u, reduction='none')
+                Lu = (Lu * mask).mean()  # 只考虑置信度高的预测的损失
+
+            else:  # 单标签分类的情况
+                # 计算有标签数据的交叉熵损失
                 Lx = F.cross_entropy(logits_x, targets_x, reduction='mean')
-                pseudo_label = torch.softmax(logits_u_w.detach()/args.T, dim=-1)
-                max_probs, targets_u = torch.max(pseudo_label, dim=-1)
+
+                # 生成无标签数据的伪标签
+                pseudo_label = torch.softmax(logits_u_w.detach()/args.T, dim=-1)  # 使用softmax生成类别概率分布
+                max_probs, targets_u = torch.max(pseudo_label, dim=-1)  # 选择最高概率的类别作为伪标签
+
+                # 生成mask,标记置信度高于阈值的预测
                 mask = max_probs.ge(args.threshold).float()
+
+                # 计算无标签数据的损失,只考虑置信度高的预测
                 Lu = (F.cross_entropy(logits_u_s, targets_u,
                                     reduction='none') * mask).mean()
 
@@ -495,11 +511,14 @@ def test(args, test_loader, model, epoch):
     losses = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
-    end = time.time()
 
-    if not args.no_progress:
-        test_loader = tqdm(test_loader,
-                           disable=args.local_rank not in [-1, 0])
+    model.eval()
+    end = time.time()
+    test_iter = tqdm(test_loader, disable=args.no_progress)
+
+
+    all_targets = []
+    all_outputs = []
 
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(test_loader):
@@ -508,32 +527,52 @@ def test(args, test_loader, model, epoch):
 
             inputs = inputs.to(args.device)
             targets = targets.to(args.device)
-            outputs = model(inputs)
-            loss = F.cross_entropy(outputs, targets)
 
-            prec1, prec5 = accuracy(outputs, targets, topk=(1, 5))
-            losses.update(loss.item(), inputs.shape[0])
-            top1.update(prec1.item(), inputs.shape[0])
-            top5.update(prec5.item(), inputs.shape[0])
+            outputs = model(inputs)
+
+            if args.multi_label:
+                loss = F.binary_cross_entropy_with_logits(outputs, targets)
+                # Collect outputs and targets for later evaluation
+                all_targets.append(targets.cpu())
+                all_outputs.append(torch.sigmoid(outputs).cpu())
+            else:
+                loss = F.cross_entropy(outputs, targets)
+                prec1, prec5 = accuracy(outputs, targets, topk=(1, 5))
+                top1.update(prec1.item(), inputs.size(0))
+                top5.update(prec5.item(), inputs.size(0))
+            losses.update(loss.item(), inputs.size(0))
+
+              
             batch_time.update(time.time() - end)
             end = time.time()
+
             if not args.no_progress:
-                test_loader.set_description("Test Iter: {batch:4}/{iter:4}. Data: {data:.3f}s. Batch: {bt:.3f}s. Loss: {loss:.4f}. top1: {top1:.2f}. top5: {top5:.2f}. ".format(
-                    batch=batch_idx + 1,
-                    iter=len(test_loader),
-                    data=data_time.avg,
-                    bt=batch_time.avg,
-                    loss=losses.avg,
-                    top1=top1.avg,
-                    top5=top5.avg,
-                ))
+                if args.multi_label:
+                    test_iter.set_description("Test Iter: {}/{}. Data: {:.3f}s. Batch: {:.3f}s. Loss: {:.4f}".format(
+                            batch_idx + 1, len(test_loader), data_time.avg, batch_time.avg, losses.avg
+                    ))
+                else:
+                    test_iter.set_description("Test Iter: {}/{}. Data: {:.3f}s. Batch: {:.3f}s. Loss: {:.4f}. Top1: {:.2f}. Top5: {:.2f}".format(
+                            batch_idx + 1, len(test_loader), data_time.avg, batch_time.avg, losses.avg, top1.avg, top5.avg
+                    ))
+
         if not args.no_progress:
-            test_loader.close()
+            test_iter.close()
 
-    logger.info("top-1 acc: {:.2f}".format(top1.avg))
-    logger.info("top-5 acc: {:.2f}".format(top5.avg))
-    return losses.avg, top1.avg
-
+    if args.multi_label:
+        # Compute multilabel metrics
+        all_outputs = torch.cat(all_outputs)
+        all_targets = torch.cat(all_targets)
+        preds = (all_outputs > 0.5).int()
+        acc = (preds == all_targets.int()).float().mean().item()
+        f1 = f1_score(all_targets.numpy(), preds.numpy(), average='macro')
+        logger.info("Multi-label accuracy: {:.2f}".format(acc * 100))
+        logger.info("Multi-label F1 (macro): {:.2f}".format(f1 * 100))
+        return losses.avg, acc * 100
+    else:
+        logger.info("Top-1 acc: {:.2f}".format(top1.avg))
+        logger.info("Top-5 acc: {:.2f}".format(top5.avg))
+        return losses.avg, top1.avg
 
 if __name__ == '__main__':
     main()

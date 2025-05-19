@@ -129,6 +129,7 @@ class TransformFixMatch(object):
         strong = self.strong(x)
         return self.normalize(weak), self.normalize(strong)
 
+
 class CIFAR10SSL(torch.utils.data.Dataset):
     def __init__(self, base_dataset, indexs=None, train=True,
                  transform=None, target_transform=None,
@@ -142,7 +143,8 @@ class CIFAR10SSL(torch.utils.data.Dataset):
             self.targets = np.array(base_dataset.targets)[indexs]
         else:
             self.data = base_dataset.data
-            self.targets = np.array(base_dataset.targets)
+            self.targets = np.stack([t.numpy() if isinstance(t, torch.Tensor) else np.array(t) for t in base_dataset.targets])
+
     def __len__(self):
         return len(self.data)
 
