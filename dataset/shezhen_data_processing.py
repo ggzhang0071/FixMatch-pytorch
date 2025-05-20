@@ -4,9 +4,6 @@ from pathlib import Path
 import random
 import csv
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib
-import seaborn as sns
 import pandas as pd
 
 # 使用支持中文的字体，例如 SimHei（黑体）

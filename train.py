@@ -395,7 +395,6 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             logits_u_w, logits_u_s = logits[batch_size:].chunk(2)
             del logits
             if args.multi_label:  # 多
-                Lx = F.binary_cross_entropy_with_logits(logits_x, targets_x.float(), reduction='mean')失
                 Lx = F.binary_cross_entropy_with_logits(logits_x, targets_x.float(), reduction='mean')
 
                 # 生成无标签数据的伪标签
