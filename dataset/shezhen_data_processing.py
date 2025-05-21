@@ -52,61 +52,60 @@ def save_labels_csv(data, csv_path):
         writer.writerow(['filename', 'labels'])  # header
         for img_path, labels in data:
             writer.writerow([img_path.name, ','.join(labels)])
-
-def prepare_fixmatch_dataset(source_root, target_root, unlabeled_ratio=0.9):
+def prepare_fixmatch_dataset(label_source_root, unlabeled_source_root, target_root, unlabeled_ratio=0.9):
     all_images = []
     all_labels = []
-    for folder in source_root.iterdir():
+    for folder in label_source_root.iterdir():
         if folder.is_dir():
             labels = [label.strip() for label in folder.name.split(',')]
-
             for img_file in folder.glob("*.jpg"):
                 all_images.append((img_file, labels))
                 all_labels.append(encode_labels(labels)) 
 
     random.shuffle(all_images) 
-    
-    # 使用analyze_multilabel_imbalance 分析all_images的标签不平衡情况
-    print_label_imbalance = False
-    if print_label_imbalance:   
-        analyze_multilabel_imbalance(all_labels, label_names=all_classes, plot=True)
 
+    # 读取无标签数据（但不复制）
+    unlabeled_images = []
+    for img_file in unlabeled_source_root.rglob("*.jpg"):
+        unlabeled_images.append((img_file, []))
 
     split_idx = int(0.8 * len(all_images))
-    train_data = all_images[:split_idx]
+    train_labeled = all_images[:split_idx]
     test_data = all_images[split_idx:]
-
-    train_labeled_num = int(len(train_data) * (1 - unlabeled_ratio))
-    train_labeled = train_data[:train_labeled_num]
-    train_unlabeled = train_data[train_labeled_num:]
 
     # 创建目录
     (target_root / 'train' / 'images').mkdir(parents=True, exist_ok=True)
-    (target_root / 'train' / 'unlabeled').mkdir(parents=True, exist_ok=True)
     (target_root / 'test' / 'images').mkdir(parents=True, exist_ok=True)
 
-    # 复制带标签的训练图像
+    # 复制有标签训练图像
     for img_path, _ in train_labeled:
         shutil.copy(img_path, target_root / 'train' / 'images' / img_path.name)
 
-    # 保存带标签训练数据标签文件
+    # 保存训练标签
     save_labels_csv(train_labeled, target_root / 'train' / 'labels.csv')
 
-    # 复制无标签的训练图像
-    for img_path, _ in train_unlabeled:
-        shutil.copy(img_path, target_root / 'train' / 'unlabeled' / img_path.name)
-
-    # 复制测试图像及标签
+    # 测试集
     for img_path, _ in test_data:
         shutil.copy(img_path, target_root / 'test' / 'images' / img_path.name)
     save_labels_csv(test_data, target_root / 'test' / 'labels.csv')
+
+    # 保存无标签图像路径引用（而不是复制图像）
+    with open(target_root / "unlabeled_path.txt", "w") as f:
+        f.write(str(unlabeled_source_root.resolve()))
+
     print(f"Train labeled images: {len(train_labeled)}")
-    print(f"Train unlabeled images: {len(train_unlabeled)}")
+    print(f"Unlabeled images directory remains at: {unlabeled_source_root}")
+    print(f"Found {len(unlabeled_images)} unlabeled images.")
+
     print(f"Test images: {len(test_data)}")
+
 
 if __name__ == "__main__":
     # 这里暂时只用了标签数据的地址，后续需要添加unlabeled数据的地址
-    source_root = Path("/git/datasets/shezhen_original_data/shezhen_label_data")
+    label_source_root = Path("/git/datasets/shezhen_original_data/shezhen_label_data")
+    unlabeled_source_root = Path("/git/datasets/shezhen_original_data/shezhen_unlabel_data")
     target_root = Path("/git/datasets/fixmatch_dataset")
-    prepare_fixmatch_dataset(source_root, target_root, unlabeled_ratio=0.5)
+    if target_root.exists():
+        shutil.rmtree(target_root)
+    prepare_fixmatch_dataset(label_source_root,unlabeled_source_root, target_root, unlabeled_ratio=0.5)
 

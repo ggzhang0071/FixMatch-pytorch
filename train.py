@@ -23,8 +23,6 @@ from dataset.shezhen_json import get_shezhen9
 from sklearn.metrics import f1_score, accuracy_score
 
 
-
-
 logger = logging.getLogger(__name__)
 best_acc = 0
 
@@ -74,6 +72,10 @@ def main():
     parser = argparse.ArgumentParser(description='PyTorch FixMatch Training')
     parser.add_argument('--data_dir', default='/git/datasets/fixmatch_dataset',
                         type=str, help='path to dataset')
+    parser.add_argument('--label_root', default='/git/datasets/fixmatch_dataset',
+                        type=str, help='path to labeled dataset')
+    parser.add_argument('--unlabeled_root', default='/git/datasets/shezhen_original_data/shezhen_unlabel_data',
+                        type=str, help='path to unlabeled dataset')
     parser.add_argument('--gpu-id', default='0', type=int,
                         help='id(s) for CUDA_VISIBLE_DEVICES')
     parser.add_argument('--num-workers', type=int, default=4,
@@ -231,7 +233,7 @@ def main():
         torch.distributed.barrier()
 
     if args.dataset == 'shezhen': 
-        labeled_dataset, unlabeled_dataset, test_dataset =get_shezhen9(args, args.data_dir)
+        labeled_dataset, unlabeled_dataset, test_dataset =get_shezhen9(args)
     else:
         labeled_dataset, unlabeled_dataset, test_dataset = DATASET_GETTERS[args.dataset](args, args.data_dir)
 
