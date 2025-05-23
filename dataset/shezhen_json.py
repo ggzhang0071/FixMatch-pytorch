@@ -27,7 +27,7 @@ normal_std = (0.5, 0.5, 0.5)
 
 
 class SheZhenDataset(Dataset):
-    def __init__(self, root, train=True, unlabeled=False, transform=None,image_size=image_size):
+    def __init__(self, root, train=True, unlabeled=False, transform=None,image_size=224):
         self.root = root
         self.train = train
         self.unlabeled = unlabeled 
@@ -138,7 +138,7 @@ def get_shezhen9(args):
 
 
 class TransformFixMatch(object):
-    def __init__(self, mean=normal_mean, std=normal_std, image_size=image_size):
+    def __init__(self, mean=normal_mean, std=normal_std, image_size=32):
         self.weak = transforms.Compose([
                 transforms.Resize((image_size, image_size)),  # ✅ 强制调整尺寸
                 transforms.RandomHorizontalFlip(),
