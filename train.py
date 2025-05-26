@@ -21,6 +21,7 @@ from utils import AverageMeter, accuracy
 from torchvision import transforms
 from dataset.shezhen_json import get_shezhen9
 from sklearn.metrics import f1_score, accuracy_score
+import logging
 
 
 logger = logging.getLogger(__name__)
@@ -146,6 +147,9 @@ def main():
     writer = SummaryWriter(log_dir='runs/fixmatch_{}_{}_experiment'.format(args.dataset,args.num_labeled))
 
 
+
+    logger = logging.getLogger(__name__)
+
     def create_model(args):
         if args.arch == 'wideresnet':
             import models.wideresnet as models
@@ -156,12 +160,27 @@ def main():
         elif args.arch == 'resnext':
             import models.resnext as models
             model = models.build_resnext(cardinality=args.model_cardinality,
-                                         depth=args.model_depth,
-                                         width=args.model_width,
-                                         num_classes=args.num_classes)
+                                        depth=args.model_depth,
+                                        width=args.model_width,
+                                        num_classes=args.num_classes)
+        else:
+            raise ValueError(f"Unknown architecture: {args.arch}")
+
+        # 将模型放到主 GPU 上
+        model = model.cuda()
+
+        # 使用 DataParallel 包装模型以支持多 GPU
+        if torch.cuda.device_count() > 1:
+            logger.info(f"Using {torch.cuda.device_count()} GPUs.")
+            model = torch.nn.DataParallel(model)
+        else:
+            logger.info("Using single GPU.")
+
         logger.info("Total params: {:.2f}M".format(
-            sum(p.numel() for p in model.parameters())/1e6))
+            sum(p.numel() for p in model.parameters()) / 1e6))
+
         return model
+
 
     if args.local_rank == -1:
         device = torch.device('cuda', args.gpu_id)
@@ -247,21 +266,18 @@ def main():
         labeled_dataset,
         sampler=train_sampler(labeled_dataset),
         batch_size=args.batch_size,
-        num_workers=args.num_workers,
         drop_last=True)
 
     unlabeled_trainloader = DataLoader(
         unlabeled_dataset,
         sampler=train_sampler(unlabeled_dataset),
         batch_size=args.batch_size*args.mu,
-        num_workers=args.num_workers,
         drop_last=True)
 
     test_loader = DataLoader(
         test_dataset,
         sampler=SequentialSampler(test_dataset),
-        batch_size=args.batch_size,
-        num_workers=args.num_workers)
+        batch_size=args.batch_size)
 
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
@@ -361,7 +377,8 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                          disable=args.local_rank not in [-1, 0])
         for batch_idx in range(args.eval_step):
             try:
-                inputs_x, targets_x = labeled_iter.next()
+                inputs_x, targets_x = next(labeled_iter)
+
                 # error occurs ↓
                 # inputs_x, targets_x = next(labeled_iter)
             except:
@@ -369,12 +386,12 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                     labeled_epoch += 1
                     labeled_trainloader.sampler.set_epoch(labeled_epoch)
                 labeled_iter = iter(labeled_trainloader)
-                inputs_x, targets_x = labeled_iter.next()
+                inputs_x, targets_x = next(labeled_iter)
                 # error occurs ↓
                 # inputs_x, targets_x = next(labeled_iter)
 
             try:
-                (inputs_u_w, inputs_u_s), _ = unlabeled_iter.next()
+                (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
                 # error occurs ↓
                 # (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
             except:
@@ -382,7 +399,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                     unlabeled_epoch += 1
                     unlabeled_trainloader.sampler.set_epoch(unlabeled_epoch)
                 unlabeled_iter = iter(unlabeled_trainloader)
-                (inputs_u_w, inputs_u_s), _ = unlabeled_iter.next()
+                (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
                 # error occurs ↓
                 # (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
 

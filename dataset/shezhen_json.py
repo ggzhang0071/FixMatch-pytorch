@@ -8,7 +8,9 @@ from PIL import Image
 from torchvision import transforms
 from torch.utils.data import Dataset
 from torchvision import datasets, transforms
-from .randaugment import RandAugmentMC
+import sys
+sys.path.append("/git/fixmatch")
+from dataset.randaugment import RandAugmentMC
 from dataset.cifar import CIFAR10SSL
 
 logger = logging.getLogger(__name__)
@@ -39,7 +41,12 @@ class SheZhenDataset(Dataset):
                 # 无标签数据使用原始地址
                 self.data_dir = self.root
                 #self.data_dir = os.path.join(root, 'train', 'unlabeled')
-                self.samples = [(fname, []) for fname in os.listdir(self.data_dir)]
+                self.samples = []
+                for root, _, files in os.walk(self.data_dir):
+                    for fname in files:
+                        # Get relative path from self.data_dir
+                        rel_path = os.path.relpath(os.path.join(root, fname), self.data_dir)
+                        self.samples.append((rel_path, []))
 
             else:
                 self.data_dir = os.path.join(root, 'train', 'images')
@@ -180,13 +187,14 @@ if __name__ == '__main__':
     parser.add_argument('--expand_labels', action='store_true',
                         help='expand labels for unlabeled data')
     args = parser.parse_args()
-    label_root="/git/datasets/fixmatch_dataset"
-    unlabeled_root="/git/datasets/shezhen_original_data/shezhen_unlabel_data"
-    args.dataset = "cifar10"
+    args.label_root="/git/datasets/fixmatch_dataset"
+    args.unlabeled_root="/git/datasets/shezhen_original_data/shezhen_unlabeled_data"
+    args.dataset = "shezhen"
+    args.image_size = 32
     DATASET_GETTERS = {'shezhen': get_shezhen9}
 
     dataset_getter = DATASET_GETTERS[args.dataset]
-    train_labeled_dataset, train_unlabeled_dataset, test_dataset = dataset_getter(args, label_root,unlabel_root)
+    train_labeled_dataset, train_unlabeled_dataset, test_dataset = dataset_getter(args)
     # 输出train_labeled_dataset和train_unlabeled_dataset中的数据包含哪些
     for i in range(5):
         print(f"Train Labeled Dataset {i}: {train_labeled_dataset[i]}")

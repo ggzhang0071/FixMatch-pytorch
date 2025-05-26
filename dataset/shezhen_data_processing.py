@@ -66,7 +66,7 @@ def prepare_fixmatch_dataset(label_source_root, unlabeled_source_root, target_ro
 
     # 读取无标签数据（但不复制）
     unlabeled_images = []
-    for img_file in unlabeled_source_root.rglob("*.jpg"):
+    for img_file in unlabeled_source_root.glob('**/*.jpg'):
         unlabeled_images.append((img_file, []))
 
     split_idx = int(0.8 * len(all_images))
@@ -103,7 +103,7 @@ def prepare_fixmatch_dataset(label_source_root, unlabeled_source_root, target_ro
 if __name__ == "__main__":
     # 这里暂时只用了标签数据的地址，后续需要添加unlabeled数据的地址
     label_source_root = Path("/git/datasets/shezhen_original_data/shezhen_label_data")
-    unlabeled_source_root = Path("/git/datasets/shezhen_original_data/shezhen_unlabel_data")
+    unlabeled_source_root = Path("/git/datasets/shezhen_original_data/shezhen_unlabeled_data")
     target_root = Path("/git/datasets/fixmatch_dataset")
     if target_root.exists():
         shutil.rmtree(target_root)
