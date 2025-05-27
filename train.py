@@ -23,9 +23,9 @@ from dataset.shezhen_json import get_shezhen9
 from sklearn.metrics import f1_score, accuracy_score
 import logging
 import os
-import os
-os.environ["NCCL_DEBUG"] = "INFO"
-os.environ["NCCL_P2P_DISABLE"] = "1"
+from torch.amp import autocast, GradScaler
+scaler = GradScaler()
+
 
 
 
@@ -82,7 +82,7 @@ def main():
                         type=str, help='path to labeled dataset')
     parser.add_argument('--gpu-id', default='0', type=int,
                         help='id(s) for CUDA_VISIBLE_DEVICES')
-    parser.add_argument('--num-workers', type=int, default=4,
+    parser.add_argument('--num_workers', type=int, default=4,
                         help='number of workers')
     parser.add_argument('--dataset', default='cifar10', type=str,
                         choices=['cifar10', 'cifar100','shezhen'],
@@ -94,7 +94,7 @@ def main():
     parser.add_argument('--image_size', type=int, default=224)
     parser.add_argument('--arch', default='wideresnet', type=str,
                         choices=['wideresnet', 'resnext'],
-                        help='dataset name')
+                        help='model architecture')
     parser.add_argument('--total-steps', default=2**20, type=int,
                         help='number of total steps to run')
     parser.add_argument('--eval-step', default=1024, type=int,
@@ -152,13 +152,11 @@ def main():
 
     def create_model(args):
         if args.arch == 'wideresnet':
-            import models.wideresnet as models
             model = models.build_wideresnet(depth=args.model_depth,
                                             widen_factor=args.model_width,
                                             dropout=0,
                                             num_classes=args.num_classes)
         elif args.arch == 'resnext':
-            import models.resnext as models
             model = models.build_resnext(cardinality=args.model_cardinality,
                                          depth=args.model_depth,
                                          width=args.model_width,
@@ -169,13 +167,9 @@ def main():
         # 将模型放到主 GPU 上
         model = model.cuda()
 
-        # 使用 DataParallel 包装模型以支持多 GPU
-        if torch.cuda.device_count() > 1:
-            logger.info(f"Using {torch.cuda.device_count()} GPUs.")
-            model = torch.nn.DataParallel(model)
-            model = model.cuda()
-        else:
-            logger.info("Using single GPU.")
+        # Log GPU info
+        logger.info("Using single GPU.")
+        model = model.cuda()
 
         logger.info("Total params: {:.2f}M".format(
             sum(p.numel() for p in model.parameters()) / 1e6))
@@ -218,9 +212,6 @@ def main():
     if args.seed is not None:
         set_seed(args)
 
-    if args.local_rank in [-1, 0]:
-        os.makedirs(args.out, exist_ok=True)
-        args.writer = SummaryWriter(args.out)
 
     if args.dataset == 'cifar10':
         args.num_classes = 10
@@ -330,14 +321,12 @@ def main():
         scheduler.load_state_dict(checkpoint['scheduler'])
 
     if args.amp:
-        from apex import amp
-        model, optimizer = amp.initialize(
-            model, optimizer, opt_level=args.opt_level)
+        # Initialize GradScaler for automatic mixed precision
+        scaler = GradScaler()
+    else:
+        scaler = None
 
-    if args.local_rank != -1:
-        model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[args.local_rank],
-            output_device=args.local_rank, find_unused_parameters=True)
+
 
     logger.info("***** Running training *****")
     logger.info(f"  Task = {args.dataset}@{args.num_labeled}")
@@ -347,15 +336,14 @@ def main():
         f"  Total train batch size = {args.batch_size*args.world_size}")
     logger.info(f"  Total optimization steps = {args.total_steps}")
 
-    model.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
+
     train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
           model, optimizer, ema_model, scheduler)
 
 
 def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
           model, optimizer, ema_model, scheduler):
-    if args.amp:
-        from apex import amp
     global best_acc
     test_accs = []
     end = time.time()
