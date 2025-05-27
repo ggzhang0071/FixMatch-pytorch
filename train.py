@@ -1,3 +1,4 @@
+# Standard library imports
 import argparse
 import logging
 import math
@@ -6,7 +7,9 @@ import random
 import shutil
 import time
 from collections import OrderedDict
+from datetime import datetime
 
+# Third-party imports
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -15,20 +18,26 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
-from dataset.cifar import DATASET_GETTERS 
-from utils import AverageMeter, accuracy
-from torchvision import transforms
-from dataset.shezhen_json import get_shezhen9
-from sklearn.metrics import f1_score, accuracy_score
-import models.wideresnet as models
 from torch.amp import autocast, GradScaler
+from torchvision import transforms
+from tqdm import tqdm
+from sklearn.metrics import f1_score, accuracy_score
+
+# Local imports
+from dataset.cifar import DATASET_GETTERS
+from dataset.shezhen_json import get_shezhen9
+from utils import AverageMeter, accuracy
+import models.wideresnet as models
+from models.ema import ModelEMA
+
+# Initialize global objects
 scaler = GradScaler()
 
 
 
+
 logger = logging.getLogger(__name__)
-best_acc = 0
+best_acc = 0.0
 
 def get_args():
     parser = argparse.ArgumentParser(description='PyTorch FixMatch Training')
@@ -36,12 +45,10 @@ def get_args():
                         type=str, help='path to labeled dataset')
     parser.add_argument('--gpu-id', default='0', type=int,
                         help='id(s) for CUDA_VISIBLE_DEVICES')
-    parser.add_argument('--num_workers', type=int, default=4,
-                        help='number of workers')
     parser.add_argument('--dataset', default='cifar10', type=str,
                         choices=['cifar10', 'cifar100','shezhen'],
                         help='dataset name')
-    parser.add_argument('--num-labeled', type=int, default=4000,
+    parser.add_argument('--num_labeled', type=int, default=4000,
                         help='number of labeled data')
     parser.add_argument("--expand-labels", action="store_true",
                         help="expand labels to fit eval steps")
@@ -159,11 +166,7 @@ def main(args):
         args.multi_label = False
 
     global best_acc
-    writer = SummaryWriter(log_dir='runs/fixmatch_{}_{}_experiment'.format(args.dataset,args.num_labeled))
-
-
-    
-
+   
         # Initialize device setup for single GPU
     if torch.cuda.is_available():
         device = torch.device('cuda', args.gpu_id)
@@ -240,7 +243,7 @@ def main(args):
 
     train_sampler = RandomSampler if args.local_rank == -1 else DistributedSampler
     #num_workers = num_workers ≈ CPU 核心数 // 2 或 核心数 - 1
-    num_workers = os.cpu_count() //2
+    num_workers = min(os.cpu_count() // 2, 8) 
 
     labeled_trainloader = DataLoader(
         labeled_dataset,
@@ -280,7 +283,6 @@ def main(args):
         optimizer, args.warmup, args.total_steps)
 
     if args.use_ema:
-        from models.ema import ModelEMA
         ema_model = ModelEMA(args, model, args.ema_decay)
 
     args.start_epoch = 0
@@ -334,6 +336,9 @@ def main(args):
 
 def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
           model, optimizer, ema_model, scheduler):
+    exp_time = datetime.now().strftime('%Y%m%d_%H%M%S')
+    writer = SummaryWriter(log_dir=f'runs/fixmatch_{args.dataset}_{args.num_labeled}_{exp_time}')
+
 
     global best_acc
     test_accs = []
@@ -449,12 +454,12 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
         if args.local_rank in [-1, 0]:
             test_loss, test_acc = test(args, test_loader, test_model, epoch)
 
-            args.writer.add_scalar('train/1.train_loss', losses.avg.item(), epoch)
-            args.writer.add_scalar('train/2.train_loss_x', losses_x.avg.item(), epoch)
-            args.writer.add_scalar('train/3.train_loss_u', losses_u.avg.item(), epoch)
-            args.writer.add_scalar('train/4.mask', mask_probs.avg.item(), epoch)
-            args.writer.add_scalar('test/1.test_acc', test_acc, epoch)
-            args.writer.add_scalar('test/2.test_loss', test_loss, epoch)
+            writer.add_scalar('train/1.train_loss', losses.avg.item(), epoch)
+            writer.add_scalar('train/2.train_loss_x', losses_x.avg.item(), epoch)
+            writer.add_scalar('train/3.train_loss_u', losses_u.avg.item(), epoch)
+            writer.add_scalar('train/4.mask', mask_probs.avg.item(), epoch)
+            writer.add_scalar('test/1.test_acc', test_acc, epoch)
+            writer.add_scalar('test/2.test_loss', test_loss, epoch)
 
             is_best = test_acc > best_acc
             best_acc = max(test_acc, best_acc)
@@ -477,7 +482,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             logger.info('Mean top-1 acc: {:.2f}\n'.format(np.mean(test_accs[-20:])))
 
     if args.local_rank in [-1, 0]:
-        args.writer.close()
+        writer.close()
 
 
 
