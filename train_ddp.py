@@ -21,9 +21,10 @@ from utils import AverageMeter, accuracy
 from torchvision import transforms
 from dataset.shezhen_json import get_shezhen9
 from sklearn.metrics import f1_score, accuracy_score
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 scaler = GradScaler()
-
+torch.multiprocessing.set_start_method('spawn', force=True)
+import torch.distributed as dist
 
 logger = logging.getLogger(__name__)
 best_acc = 0
@@ -76,7 +77,7 @@ def main():
                         type=str, help='path to dataset')
     parser.add_argument('--root', default='/git/datasets/fixmatch_dataset',
                         type=str, help='path to labeled dataset')
-    parser.add_argument('--gpu-id', default='0', type=int,
+    parser.add_argument('--gpu-id', default='0', type=str,  # 修改为 str 支持多卡传入 e.g. "0,1,2"
                         help='id(s) for CUDA_VISIBLE_DEVICES')
     parser.add_argument('--dataset', default='cifar10', type=str,
                         choices=['cifar10', 'cifar100','shezhen'],
@@ -88,7 +89,7 @@ def main():
     parser.add_argument('--image_size', type=int, default=224)
     parser.add_argument('--arch', default='wideresnet', type=str,
                         choices=['wideresnet', 'resnext'],
-                        help='dataset name')
+                        help='model architecture')
     parser.add_argument('--total-steps', default=2**20, type=int,
                         help='number of total steps to run')
     parser.add_argument('--eval-step', default=1024, type=int,
@@ -96,7 +97,7 @@ def main():
     parser.add_argument('--start-epoch', default=0, type=int,
                         help='manual epoch number (useful on restarts)')
     parser.add_argument('--batch-size', default=64, type=int,
-                        help='train batchsize')
+                        help='train batchsize per GPU')
     parser.add_argument('--lr', '--learning-rate', default=0.03, type=float,
                         help='initial learning rate')
     parser.add_argument('--warmup', default=0, type=float,
@@ -126,59 +127,37 @@ def main():
     parser.add_argument("--amp", action="store_true",
                         help="use 16-bit (mixed) precision through NVIDIA apex AMP")
     parser.add_argument("--opt_level", type=str, default="O1",
-                        help="apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
-                        "See details at https://nvidia.github.io/apex/amp.html")
+                        help="apex AMP optimization level selected in ['O0', 'O1', 'O2', 'O3']")
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="For distributed training: local_rank")
     parser.add_argument('--no-progress', action='store_true',
                         help="don't use progress bar")
 
-
     args = parser.parse_args()
-    if args.dataset == 'shezhen':
-        args.multi_label = True
-    else:
-        args.multi_label = False
-
-    global best_acc
-    writer = SummaryWriter(log_dir='runs/fixmatch_{}_{}_experiment'.format(args.dataset,args.num_labeled))
+    args.world_size = dist.get_world_size() if dist.is_initialized() else 1
+    print(f"local_rank: {args.local_rank}, world_size: {args.world_size}")
 
 
-    def create_model(args):
-        if args.arch == 'wideresnet':
-            import models.wideresnet as models
-            model = models.build_wideresnet(depth=args.model_depth,
-                                            widen_factor=args.model_width,
-                                            dropout=0,
-                                            num_classes=args.num_classes)
-        elif args.arch == 'resnext':
-            import models.resnext as models
-            model = models.build_resnext(cardinality=args.model_cardinality,
-                                         depth=args.model_depth,
-                                         width=args.model_width,
-                                         num_classes=args.num_classes)
-        logger.info("Total params: {:.2f}M".format(
-            sum(p.numel() for p in model.parameters())/1e6))
-        return model
+    # multi-label flag
+    args.multi_label = (args.dataset == 'shezhen')
 
-
-
-    # Initialize distributed training
-    if args.local_rank != -1:  # For distributed training
+    # -------------------
+    # 初始化分布式环境
+    # -------------------
+    if args.local_rank != -1:
         torch.cuda.set_device(args.local_rank)
-        device = torch.device('cuda', args.local_rank)
-        torch.distributed.init_process_group(backend='nccl')
+        torch.distributed.init_process_group(backend='nccl', init_method='env://')
         args.world_size = torch.distributed.get_world_size()
         args.n_gpu = 1
-    else:  # For non-distributed training with multiple GPUs
+    else:
         if torch.cuda.is_available():
-            if ',' in str(args.gpu_id):  # Multiple GPUs specified
-                device_ids = [int(id) for id in args.gpu_id.split(',')]
-                device = torch.device('cuda', device_ids[0])  # Use first GPU as primary
+            if ',' in args.gpu_id:
+                device_ids = [int(x) for x in args.gpu_id.split(',')]
+                device = torch.device('cuda', device_ids[0])
                 args.world_size = len(device_ids)
                 args.n_gpu = len(device_ids)
-            else:  # Single GPU specified
-                device = torch.device('cuda', args.gpu_id)
+            else:
+                device = torch.device('cuda', int(args.gpu_id))
                 args.world_size = 1
                 args.n_gpu = 1
         else:
@@ -198,17 +177,16 @@ def main():
         f"device: {args.device}, "
         f"n_gpu: {args.n_gpu}, "
         f"distributed training: {bool(args.local_rank != -1)}, "
-        f"16-bits training: {args.amp}",)
+        f"16-bits training: {args.amp}")
 
     logger.info(dict(args._get_kwargs()))
 
     if args.seed is not None:
         set_seed(args)
 
-    if args.local_rank in [-1, 0]:
-        os.makedirs(args.out, exist_ok=True)
-        args.writer = SummaryWriter(args.out)
-
+    # --------------------
+    # 设置模型结构参数
+    # --------------------
     if args.dataset == 'cifar10':
         args.num_classes = 10
         if args.arch == 'wideresnet':
@@ -218,7 +196,6 @@ def main():
             args.model_cardinality = 4
             args.model_depth = 28
             args.model_width = 4
-
     elif args.dataset == 'cifar100':
         args.num_classes = 100
         if args.arch == 'wideresnet':
@@ -237,124 +214,169 @@ def main():
             args.model_cardinality = 4
             args.model_depth = 28
             args.model_width = 4
-    else:   
-        raise ValueError(
-            f"Unknown dataset {args.dataset}, please check the dataset name.")
+    else:
+        raise ValueError(f"Unknown dataset {args.dataset}, please check the dataset name.")
 
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
 
-    if args.dataset == 'shezhen': 
-        labeled_dataset, unlabeled_dataset, test_dataset =get_shezhen9(args)
+    # --------------------
+    # 加载数据集（你这里根据自己项目改）
+    # --------------------
+    if args.dataset == 'shezhen':
+        labeled_dataset, unlabeled_dataset, test_dataset = get_shezhen9(args)
     else:
+        # 这里需要定义你的 DATASET_GETTERS 字典
         labeled_dataset, unlabeled_dataset, test_dataset = DATASET_GETTERS[args.dataset](args, args.data_dir)
-
 
     if args.local_rank == 0:
         torch.distributed.barrier()
 
-    train_sampler = RandomSampler if args.local_rank == -1 else DistributedSampler
-    #num_workers = num_workers ≈ CPU 核心数 // 2 或 核心数 - 1
-    num_workers = os.cpu_count() //2
+    # --------------------
+    # DataLoader 及 Sampler
+    # --------------------
+    num_workers = min(4, (os.cpu_count() or 4) // args.world_size)
+
+    LabeledSampler = RandomSampler if args.local_rank == -1 else DistributedSampler
+    UnlabeledSampler = RandomSampler if args.local_rank == -1 else DistributedSampler
 
     labeled_trainloader = DataLoader(
         labeled_dataset,
-        sampler=train_sampler(labeled_dataset),
+        sampler=LabeledSampler(labeled_dataset),
         batch_size=args.batch_size,
-        drop_last=True,num_workers=num_workers,pin_memory=True,prefetch_factor=2)
+        drop_last=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        prefetch_factor=2)
 
     unlabeled_trainloader = DataLoader(
         unlabeled_dataset,
-        sampler=train_sampler(unlabeled_dataset),
-        batch_size=args.batch_size*args.mu,
-        drop_last=True, num_workers=num_workers, pin_memory=True,prefetch_factor=2)
+        sampler=UnlabeledSampler(unlabeled_dataset),
+        batch_size=args.batch_size * args.mu,
+        drop_last=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        prefetch_factor=2)
 
     test_loader = DataLoader(
         test_dataset,
         sampler=SequentialSampler(test_dataset),
-        batch_size=args.batch_size*2, num_workers=num_workers,
-        pin_memory=True,prefetch_factor=2)
+        batch_size=args.batch_size * 2,
+        num_workers=num_workers,
+        pin_memory=True,
+        prefetch_factor=2)
 
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
 
+    # --------------------
+    # 创建模型
+    # --------------------
+    def create_model(args):
+        if args.arch == 'wideresnet':
+            import models.wideresnet as models
+            model = models.build_wideresnet(depth=args.model_depth,
+                                            widen_factor=args.model_width,
+                                            dropout=0,
+                                            num_classes=args.num_classes)
+        elif args.arch == 'resnext':
+            import models.resnext as models
+            model = models.build_resnext(cardinality=args.model_cardinality,
+                                         depth=args.model_depth,
+                                         width=args.model_width,
+                                         num_classes=args.num_classes)
+        logger.info("Total params: {:.2f}M".format(
+            sum(p.numel() for p in model.parameters()) / 1e6))
+        return model
+
     model = create_model(args)
+    model.to(args.device)
 
     if args.local_rank == 0:
         torch.distributed.barrier()
 
-    model.to(args.device)
+    if args.local_rank != -1:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            find_unused_parameters=True)
 
+    # --------------------
+    # 优化器和调度器
+    # --------------------
     no_decay = ['bias', 'bn']
     grouped_parameters = [
-        {'params': [p for n, p in model.named_parameters() if not any(
-            nd in n for nd in no_decay)], 'weight_decay': args.wdecay},
-        {'params': [p for n, p in model.named_parameters() if any(
-            nd in n for nd in no_decay)], 'weight_decay': 0.0}
+        {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+         'weight_decay': args.wdecay},
+        {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+         'weight_decay': 0.0}
     ]
+
     optimizer = optim.SGD(grouped_parameters, lr=args.lr,
                           momentum=0.9, nesterov=args.nesterov)
 
     args.epochs = math.ceil(args.total_steps / args.eval_step)
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer, args.warmup, args.total_steps)
+    scheduler = get_cosine_schedule_with_warmup(optimizer, args.warmup, args.total_steps)
 
+    # --------------------
+    # EMA
+    # --------------------
+    ema_model = None
     if args.use_ema:
         from models.ema import ModelEMA
         ema_model = ModelEMA(args, model, args.ema_decay)
 
+    # --------------------
+    # 恢复训练
+    # --------------------
     args.start_epoch = 0
+    best_acc = 0
 
     if args.resume:
-        logger.info("==> Resuming from checkpoint..")
-        assert os.path.isfile(
-            args.resume), "Error: no checkpoint directory found!"
+        if args.local_rank in [-1, 0]:
+            logger.info("==> Resuming from checkpoint..")
+        assert os.path.isfile(args.resume), "Checkpoint not found!"
+        checkpoint = torch.load(args.resume, map_location='cpu')
         args.out = os.path.dirname(args.resume)
-        checkpoint = torch.load(args.resume)
-        best_acc = checkpoint['best_acc']
         args.start_epoch = checkpoint['epoch']
-        model.load_state_dict(checkpoint['state_dict'])
+        best_acc = checkpoint.get('best_acc', 0)
+        if hasattr(model, 'module'):
+            model.module.load_state_dict(checkpoint['state_dict'])
+        else:
+            model.load_state_dict(checkpoint['state_dict'])
         if args.use_ema:
             ema_model.ema.load_state_dict(checkpoint['ema_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         scheduler.load_state_dict(checkpoint['scheduler'])
 
-    if args.amp:
-        model = model.to(device)
-        optimizer = torch.optim.SGD(
-            grouped_parameters,       # 模型参数
-            lr=args.lr,               # 学习率
-            momentum=0.9,             # 常用动量
-            weight_decay=5e-4,        # 权重衰减
-            nesterov=args.nesterov  # 是否使用Nesterov动量
-        )
-        scaler = GradScaler()
+    # --------------------
+    # AMP 支持
+    # --------------------
+    scaler = GradScaler() if args.amp else None
 
-      
-    if args.local_rank != -1:
-        model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[args.local_rank],
-            output_device=args.local_rank, find_unused_parameters=True)
-
-    logger.info("***** Running training *****")
-    logger.info(f"  Task = {args.dataset}@{args.num_labeled}")
-    logger.info(f"  Num Epochs = {args.epochs}")
-    logger.info(f"  Batch size per GPU = {args.batch_size}")
-    logger.info(
-        f"  Total train batch size = {args.batch_size*args.world_size}")
-    logger.info(f"  Total optimization steps = {args.total_steps}")
+    # --------------------
+    # 训练信息打印（主进程）
+    # --------------------
+    if args.local_rank in [-1, 0]:
+        writer = SummaryWriter(log_dir=f'runs/fixmatch_{args.dataset}_{args.num_labeled}_experiment')
+        logger.info("***** Running training *****")
+        logger.info(f"  Task = {args.dataset}@{args.num_labeled}")
+        logger.info(f"  Num Epochs = {args.epochs}")
+        logger.info(f"  Batch size per GPU = {args.batch_size}")
+        logger.info(f"  Total train batch size = {args.batch_size * args.world_size}")
+        logger.info(f"  Total optimization steps = {args.total_steps}")
 
     optimizer.zero_grad(set_to_none=True)
 
-
+    return args, model, optimizer, scheduler, scaler, ema_model, best_acc, \
+           labeled_trainloader, unlabeled_trainloader, test_loader, writer if args.local_rank in [-1, 0] else None
+    
     train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
           model, optimizer, ema_model, scheduler)
 
 
-
 def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
           model, optimizer, ema_model, scheduler):
-
     global best_acc
     test_accs = []
     end = time.time()
@@ -574,4 +596,12 @@ def test(args, test_loader, model, epoch):
         return losses.avg, top1.avg
 
 if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--local_rank", type=int, default=-1)  # 非常关键
+    args, unknown = parser.parse_known_args()
+    
+    # 这一步非常关键，argparse 需要将 local_rank 传给主函数
+    import sys
+    sys.argv += [f"--local_rank={args.local_rank}"]
     main()
