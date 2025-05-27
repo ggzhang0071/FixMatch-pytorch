@@ -30,67 +30,8 @@ scaler = GradScaler()
 logger = logging.getLogger(__name__)
 best_acc = 0
 
-
-def save_checkpoint(state, is_best, checkpoint, filename='checkpoint.pth.tar'):
-    filepath = os.path.join(checkpoint, filename)
-    torch.save(state, filepath)
-    if is_best:
-        shutil.copyfile(filepath, os.path.join(checkpoint,
-                                               'model_best.pth.tar'))
-
-
-def set_seed(args):
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if args.n_gpu > 0:
-        torch.cuda.manual_seed_all(args.seed)
-
-
-def get_cosine_schedule_with_warmup(optimizer,
-                                    num_warmup_steps,
-                                    num_training_steps,
-                                    num_cycles=7./16.,
-                                    last_epoch=-1):
-    def _lr_lambda(current_step):
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
-        no_progress = float(current_step - num_warmup_steps) / \
-            float(max(1, num_training_steps - num_warmup_steps))
-        return max(0., math.cos(math.pi * num_cycles * no_progress))
-
-    return LambdaLR(optimizer, _lr_lambda, last_epoch)
-
-
-def interleave(x, size):
-    s = list(x.shape)
-    return x.reshape([-1, size] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
-
-
-def de_interleave(x, size):
-    s = list(x.shape)
-    return x.reshape([size, -1] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
-
-def create_model(args):
-    if args.arch == 'wideresnet':
-        model = models.build_wideresnet(depth=args.model_depth,
-                                      widen_factor=args.model_width,
-                                      dropout=0,
-                                      num_classes=args.num_classes)
-    elif args.arch == 'resnext':
-        model = models.build_resnext(cardinality=args.model_cardinality,
-                                   depth=args.model_depth,
-                                   width=args.model_width,
-                                   num_classes=args.num_classes)
-    logger.info("Total params: {:.2f}M".format(
-        sum(p.numel() for p in model.parameters())/1e6))
-    return model
-
-
-def main():
+def get_args():
     parser = argparse.ArgumentParser(description='PyTorch FixMatch Training')
-    parser.add_argument('--data_dir', default='/git/datasets/fixmatch_dataset',
-                        type=str, help='path to dataset')
     parser.add_argument('--root', default='/git/datasets/fixmatch_dataset',
                         type=str, help='path to labeled dataset')
     parser.add_argument('--gpu-id', default='0', type=int,
@@ -151,9 +92,67 @@ def main():
                         help="For distributed training: local_rank")
     parser.add_argument('--no-progress', action='store_true',
                         help="don't use progress bar")
-
-
     args = parser.parse_args()
+    return args
+
+
+def save_checkpoint(state, is_best, checkpoint, filename='checkpoint.pth.tar'):
+    filepath = os.path.join(checkpoint, filename)
+    torch.save(state, filepath)
+    if is_best:
+        shutil.copyfile(filepath, os.path.join(checkpoint,
+                                               'model_best.pth.tar'))
+
+
+def set_seed(args):
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if args.n_gpu > 0:
+        torch.cuda.manual_seed_all(args.seed)
+
+
+def get_cosine_schedule_with_warmup(optimizer,
+                                    num_warmup_steps,
+                                    num_training_steps,
+                                    num_cycles=7./16.,
+                                    last_epoch=-1):
+    def _lr_lambda(current_step):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        no_progress = float(current_step - num_warmup_steps) / \
+            float(max(1, num_training_steps - num_warmup_steps))
+        return max(0., math.cos(math.pi * num_cycles * no_progress))
+
+    return LambdaLR(optimizer, _lr_lambda, last_epoch)
+
+
+def interleave(x, size):
+    s = list(x.shape)
+    return x.reshape([-1, size] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
+
+
+def de_interleave(x, size):
+    s = list(x.shape)
+    return x.reshape([size, -1] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
+
+def create_model(args):
+    if args.arch == 'wideresnet':
+        model = models.build_wideresnet(depth=args.model_depth,
+                                      widen_factor=args.model_width,
+                                      dropout=0,
+                                      num_classes=args.num_classes)
+    elif args.arch == 'resnext':
+        model = models.build_resnext(cardinality=args.model_cardinality,
+                                   depth=args.model_depth,
+                                   width=args.model_width,
+                                   num_classes=args.num_classes)
+    logger.info("Total params: {:.2f}M".format(
+        sum(p.numel() for p in model.parameters())/1e6))
+    return model
+
+
+def main(args):
     if args.dataset == 'shezhen':
         args.multi_label = True
     else:
@@ -506,7 +505,7 @@ def test(args, test_loader, model, epoch):
             inputs = inputs.to(args.device, non_blocking=True)
             targets = targets.to(args.device, non_blocking=True)
 
-            with autocast():  # AMP 推理
+            with autocast(device_type='cuda', enabled=args.amp):  # AMP 推理
                 outputs = model(inputs)
 
                 if args.multi_label:
@@ -553,4 +552,5 @@ def test(args, test_loader, model, epoch):
         return losses.avg, top1.avg
 
 if __name__ == '__main__':
-    main()
+    args = get_args()
+    main(args)
