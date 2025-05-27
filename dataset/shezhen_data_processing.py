@@ -67,7 +67,8 @@ def prepare_fixmatch_dataset(label_source_root, unlabeled_source_root, target_ro
     # 读取无标签数据（但不复制）
     unlabeled_images = []
     for img_file in unlabeled_source_root.glob('**/*.jpg'):
-        unlabeled_images.append((img_file, []))
+        if '模糊' not in str(img_file):
+            unlabeled_images.append((img_file, []))
 
     split_idx = int(0.8 * len(all_images))
     train_labeled = all_images[:split_idx]
@@ -90,11 +91,13 @@ def prepare_fixmatch_dataset(label_source_root, unlabeled_source_root, target_ro
     save_labels_csv(test_data, target_root / 'test' / 'labels.csv')
 
     # 保存无标签图像路径引用（而不是复制图像）
-    with open(target_root / "unlabeled_path.txt", "w") as f:
-        f.write(str(unlabeled_source_root.resolve()))
+    with open(target_root / "unlabeled_images.txt", "w") as f:
+        for img_path, _ in unlabeled_images:
+            f.write(str(img_path.resolve()) + "\n")
+    print(f"Unlabeled images list saved to: {target_root / 'unlabeled_images.txt'}")
+
 
     print(f"Train labeled images: {len(train_labeled)}")
-    print(f"Unlabeled images directory remains at: {unlabeled_source_root}")
     print(f"Found {len(unlabeled_images)} unlabeled images.")
 
     print(f"Test images: {len(test_data)}")
